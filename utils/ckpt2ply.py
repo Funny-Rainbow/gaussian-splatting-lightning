@@ -35,7 +35,7 @@ if not args.override:
     assert os.path.exists(args.output) is False, f"Output file already exists, please remove it first: '{args.output}'"
 
 print(f"Loading checkpoint '{load_file}'...")
-ckpt = torch.load(load_file)
+ckpt = torch.load(load_file, weights_only=False)
 print("Converting...")
 model = GaussianPlyUtils.load_from_state_dict(ckpt["state_dict"]).to_ply_format()
 if args.drop_shs_rest:
