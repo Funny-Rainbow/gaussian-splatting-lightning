@@ -47,6 +47,8 @@ class GNS(VanillaDensityController):
 
     edge_aware: bool = True
 
+    long_axis_split: bool = True
+
     edge_on_cpu: bool = False
 
     def instantiate(self, *args, **kwargs):
@@ -129,7 +131,7 @@ class GNSModule(LoggerMixin, VanillaDensityControllerImpl):
 
     @staticmethod
     def rasterize_to_vis_aware_weights(opacities, projections, isects, pixel_weights, preprocessed_camera):
-        img_width, img_height = preprocessed_camera[-1]
+        img_width, img_height = preprocessed_camera[2]
 
         radii, means2d, depths, conics, _ = projections
         _, _, flatten_ids, isect_offsets = isects
@@ -267,7 +269,7 @@ class GNSModule(LoggerMixin, VanillaDensityControllerImpl):
         n_expected = selected_pts_mask.sum()
         step_budget = self.get_budget_by_step(self.avoid_state_dict["pl"].global_step)
         budget = min(step_budget, n_current + n_expected)
-        n_addable = budget - n_current
+        n_addable = max(budget - n_current, 0)
         self.log_metric("n_expected", n_expected)
         self.log_metric("step_budget", step_budget)
         self.log_metric("n_addable", n_addable)
@@ -289,9 +291,11 @@ class GNSModule(LoggerMixin, VanillaDensityControllerImpl):
             final_selected_pts_mask[sampled_indices] = True
 
             # densify
-            # self._densify_and_clone(gaussian_model, optimizers, final_selected_pts_mask)
-            # self._densify_and_split(gaussian_model, optimizers, final_selected_pts_mask)
-            self._long_axis_split(gaussian_model, optimizers, final_selected_pts_mask)
+            if self.config.long_axis_split:
+                self._long_axis_split(gaussian_model, optimizers, final_selected_pts_mask)
+            else:
+                self._densify_and_clone(gaussian_model, optimizers, final_selected_pts_mask)
+                self._densify_and_split(gaussian_model, optimizers, final_selected_pts_mask)
 
         # prune
         if self.config.cull_by_max_opacity:
@@ -311,25 +315,69 @@ class GNSModule(LoggerMixin, VanillaDensityControllerImpl):
 
         torch.cuda.empty_cache()
 
-    # def _densify_and_clone(self, gaussian_model, optimizers, selected_pts_mask):
-    #     percent_dense = self.config.percent_dense
-    #     scene_extent = self.cameras_extent
+    def _densify_and_clone(self, gaussian_model, optimizers, selected_pts_mask):
+        percent_dense = self.config.percent_dense
+        scene_extent = self.cameras_extent
 
-    #     # Exclude big Gaussians
-    #     selected_pts_mask = torch.logical_and(
-    #         selected_pts_mask,
-    #         torch.max(gaussian_model.get_scales(), dim=1).values <= percent_dense * scene_extent,
-    #     )
+        # Exclude big Gaussians
+        selected_pts_mask = torch.logical_and(
+            selected_pts_mask,
+            torch.max(gaussian_model.get_scales(), dim=1).values <= percent_dense * scene_extent,
+        )
 
-    #     self.log_metric("n_clone", selected_pts_mask.sum())
+        self.log_metric("n_clone", selected_pts_mask.sum())
 
-    #     # Copy selected Gaussians
-    #     new_properties = {}
-    #     for key, value in gaussian_model.properties.items():
-    #         new_properties[key] = value[selected_pts_mask]
+        # Copy selected Gaussians
+        new_properties = {}
+        for key, value in gaussian_model.properties.items():
+            new_properties[key] = value[selected_pts_mask]
 
-    #     # Update optimizers and properties
-    #     self._densification_postfix(new_properties, gaussian_model, optimizers)
+        # Update optimizers and properties
+        self._densification_postfix(new_properties, gaussian_model, optimizers)
+
+    def _densify_and_split(self, gaussian_model, optimizers, selected_pts_mask, N: int = 2):
+        percent_dense = self.config.percent_dense
+        scene_extent = self.cameras_extent
+
+        device = gaussian_model.get_property("means").device
+        scales = gaussian_model.get_scales()
+
+        # The number of Gaussians and `grads` is different after cloning, so padding is required
+        # padded_grad = torch.zeros((n_init_points,), device=device)
+        # padded_grad[:grads.shape[0]] = grads.squeeze()
+
+        # Padding the mask, which assuming that the cloned primitives are appended to the existing ones
+        padded_mask = torch.zeros((gaussian_model.n_gaussians,), device=device)
+        padded_mask[:selected_pts_mask.shape[0]] = selected_pts_mask
+        selected_pts_mask = padded_mask
+
+        # Exclude small Gaussians
+        selected_pts_mask = torch.logical_and(
+            selected_pts_mask,
+            torch.max(
+                scales,
+                dim=1,
+            ).values > percent_dense * scene_extent,
+        )
+
+        self.log_metric("n_split", selected_pts_mask.sum())
+
+        # Split
+        new_properties = self._split_properties(gaussian_model, selected_pts_mask, N)
+
+        # Update optimizers and properties
+        self._densification_postfix(new_properties, gaussian_model, optimizers)
+
+        # Prune selected Gaussians, since they are already split
+        prune_filter = torch.cat((
+            selected_pts_mask,
+            torch.zeros(
+                N * selected_pts_mask.sum(),
+                device=device,
+                dtype=torch.bool,
+            ),
+        ))
+        self._prune_points(prune_filter, gaussian_model, optimizers)
 
     def _split_means_and_scales(self, gaussian_model, selected_pts_mask, N):
         scales = gaussian_model.get_scales()
