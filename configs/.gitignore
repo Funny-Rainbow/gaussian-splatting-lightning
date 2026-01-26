@@ -103,3 +103,8 @@
 !bilagrid.yaml
 !bilagrid_fused.yaml
 !background_removal.yaml
+!gns.yaml
+!depth_regularization/da3_inverse.yaml
+!grad_acc.yaml
+!plugins
+!glossy.yaml
