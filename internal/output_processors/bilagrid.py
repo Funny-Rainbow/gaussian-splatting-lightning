@@ -93,8 +93,8 @@ class BilagridProcessorModule(torch.nn.Module):
 
         return optimizer, torch.optim.lr_scheduler.LambdaLR(
             optimizer=optimizer,
-            lr_lambda=lambda iter: self.config.lr_final_factor ** min(iter / self.config.max_steps, 1),
-            verbose=False,
+            lr_lambda=lambda iter: self.config.lr_final_factor ** min(iter / self.config.max_steps, 1)
+            
         )
 
     def tv_loss(self, outputs, batch, gaussian_model, global_step, pl_module, metrics, pbar):
