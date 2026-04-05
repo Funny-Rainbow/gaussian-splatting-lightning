@@ -158,3 +158,7 @@ class DatasetParams:
     background_sphere_distance: float = 2.2
 
     background_sphere_points: int = 204_800
+
+    allow_mask_interpolation: bool = False
+
+    mask_interpolation_mode: Literal["bilinear", "nearest"] = "bilinear"

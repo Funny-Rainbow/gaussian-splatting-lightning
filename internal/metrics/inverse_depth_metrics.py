@@ -52,17 +52,27 @@ class HasInverseDepthMetricsModule(VanillaMetricsImpl):
         else:
             raise NotImplementedError()
 
-    def _depth_l1_loss(self, a, b):
-        return torch.abs(a - b).mean()
+    def _masked_mean(self, value, valid_mask):
+        if valid_mask is None:
+            return value.mean()
 
-    def _depth_l1_and_ssim_loss(self, a, b):
-        l1_loss = self._depth_l1_loss(a, b)
+        valid_mask = valid_mask.to(dtype=value.dtype, device=value.device)
+        valid_count = valid_mask.sum()
+        if valid_count <= 0:
+            return torch.tensor(0., device=value.device, dtype=value.dtype)
+        return (value * valid_mask).sum() / valid_count
+
+    def _depth_l1_loss(self, a, b, valid_mask=None):
+        return self._masked_mean(torch.abs(a - b), valid_mask)
+
+    def _depth_l1_and_ssim_loss(self, a, b, valid_mask=None):
+        l1_loss = self._depth_l1_loss(a, b, valid_mask)
         ssim_metric = self.depth_ssim(a[None, None, ...], b[None, None, ...])
 
         return (1 - self.config.depth_loss_ssim_weight) * l1_loss + self.config.depth_loss_ssim_weight * (1 - ssim_metric)
 
-    def _depth_l2_loss(self, a, b):
-        return ((a - b) ** 2).mean()
+    def _depth_l2_loss(self, a, b, valid_mask=None):
+        return self._masked_mean((a - b) ** 2, valid_mask)
 
     def _depth_kl_loss(self, a, b):
         pass
@@ -91,17 +101,22 @@ class HasInverseDepthMetricsModule(VanillaMetricsImpl):
             gt_inverse_depth = gt_inverse_depth / mean_depth
             predicted_inverse_depth = predicted_inverse_depth / mean_depth
 
+        valid_mask = torch.ones_like(gt_inverse_depth, dtype=torch.bool, device=device)
+
         if gt_inverse_depth_data.mask is not None:
-            gt_inverse_depth = gt_inverse_depth * gt_inverse_depth_data.mask
-            predicted_inverse_depth = predicted_inverse_depth * gt_inverse_depth_data.mask
+            depth_mask = gt_inverse_depth_data.mask
+            if depth_mask.ndim == 3:
+                depth_mask = depth_mask[0]
+            valid_mask = valid_mask & depth_mask.to(device=device, dtype=torch.bool)
 
         # mask
         if image_info[-1] is not None:
-            mask = image_info[-1].to(torch.uint8)
-            gt_inverse_depth = gt_inverse_depth * mask
-            predicted_inverse_depth = predicted_inverse_depth * mask
+            image_mask = image_info[-1]
+            if image_mask.ndim == 3:
+                image_mask = image_mask[0]
+            valid_mask = valid_mask & image_mask.to(device=device, dtype=torch.bool)
 
-        return self._get_inverse_depth_loss(gt_inverse_depth, predicted_inverse_depth)
+        return self._get_inverse_depth_loss(gt_inverse_depth, predicted_inverse_depth, valid_mask)
 
     def get_weight(self, step: int):
         return self.config.depth_loss_weight.init * (self.config.depth_loss_weight.final_factor ** min(step / self.config.depth_loss_weight.max_steps, 1))

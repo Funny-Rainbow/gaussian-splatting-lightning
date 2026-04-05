@@ -148,6 +148,15 @@ python main.py fit \
   --data.parser.mask_dir MASK_DIR_PATH \
   ...
 ```
+If the mask resolution does not match the training image resolution, you can enable interpolation:
+```bash
+... fit \
+  --data.allow_mask_interpolation true \
+  --data.mask_interpolation_mode nearest \
+  ...
+```
+`--data.mask_interpolation_mode` supports `bilinear` (default) and `nearest`.
+
 * Use downsampled images (colmap dataset only)
 
 You can use `utils/image_downsample.py` to downsample your images, e.g. 4x downsample: `python utils/image_downsample.py PATH_TO_DIRECTORY_THAT_STORE_IMAGES --factor 4`
@@ -884,4 +893,3 @@ Besides: You can also click the 'Reset up direction' button. Then the viewer wil
 <b>Q: </b> The web viewer is slow (or low fps, far from real-time).
 
 <b>A: </b> This is expected because of the overhead of the image transfer over network. You can get around 10fps in 1080P resolution, which is enough for you to view the reconstruction quality.
-

@@ -120,14 +120,13 @@ class Taming3DGSDensityControllerModule(VanillaDensityControllerImpl):
         )
 
     def on_train_start(self, gaussian_model, pl_module):
-        assert pl_module.trainer.train_dataloader.max_cache_num < 0
-
         self._densify_iter_num.fill_(max(pl_module.global_step // self.config.densification_interval - self.config.densify_from_iter // self.config.densification_interval, 0) + 1)
         print("densify_iter_num={}, budget={}\n".format(self.densify_iter_num, self.counts_array[self.densify_iter_num]))
 
         from tqdm.auto import tqdm
 
-        train_set = pl_module.trainer.train_dataloader.cached
+        train_dataloader = pl_module.trainer.train_dataloader
+        train_set = train_dataloader.iter_local_items() if hasattr(train_dataloader, "iter_local_items") else train_dataloader.cached
 
         all_edges = []
         for item in tqdm(train_set, leave=False, desc="Getting edges..."):
@@ -156,11 +155,15 @@ class Taming3DGSDensityControllerModule(VanillaDensityControllerImpl):
         pl_module = self.avoid_state_dict[0]
 
         # sample cameras
-        n_cameras = len(pl_module.trainer.train_dataloader.cached)
+        train_dataloader = pl_module.trainer.train_dataloader
+        n_cameras = len(train_dataloader)
         sample_cameras = []
         sample_edge_losses = []
         for camera_idx in torch.randperm(n_cameras, dtype=torch.int)[:self.config.n_sample_cameras].tolist():
-            sample_cameras.append(pl_module.trainer.train_dataloader.cached[camera_idx])
+            if hasattr(train_dataloader, "get_local_item"):
+                sample_cameras.append(train_dataloader.get_local_item(camera_idx))
+            else:
+                sample_cameras.append(train_dataloader.cached[camera_idx])
             sample_edge_losses.append(self.all_edges[camera_idx])
 
         # calculate importance

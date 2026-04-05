@@ -195,39 +195,56 @@ class EstimatedDepthColmapDataParser(ColmapDataParser):
 
     @classmethod
     def get_depth_loader(cls, allow_depth_interpolation: bool, median_normalization: bool, depth_in_uint16: bool):
-        def load_depth(depth_info):
+        def load_depth(depth_info, image_hw=None):
             if depth_info is None:
                 return None
 
             depth_file_path, depth_scale, camera = depth_info
+            raw_depth = cls.load_depth_file(depth_file_path)
 
-            depth = DepthMap.create(
-                cls.load_depth_file(depth_file_path),
-                scale=depth_scale["scale"],
-                offset=depth_scale["offset"],
-                in_uint16=depth_in_uint16,
-            )
+            if isinstance(raw_depth, np.ndarray) and raw_depth.ndim == 3 and raw_depth.shape[-1] == 1:
+                raw_depth = raw_depth[..., 0]
+
+            target_hw = image_hw
+            if target_hw is None:
+                target_hw = (int(camera.height.item()), int(camera.width.item()))
+
+            source_hw = raw_depth.shape[:2]
+            should_interpolate = source_hw != target_hw
+
+            if should_interpolate:
+                assert allow_depth_interpolation, (
+                    "the shape '{}' of depth map '{}' doesn't match to the image '{}'. "
+                    "Add '--data.parser.allow_depth_interpolation=true' if this is expected"
+                ).format(source_hw, depth_file_path, target_hw)
+
+                interpolated_depth = torch.nn.functional.interpolate(
+                    torch.from_numpy(raw_depth.astype(np.float32))[None, None, ...],
+                    target_hw,
+                    mode="bilinear",
+                    align_corners=True,
+                )[0, 0]
+                depth = DepthMap.create(
+                    interpolated_depth,
+                    scale=depth_scale["scale"],
+                    offset=depth_scale["offset"],
+                    in_uint16=False,
+                )
+            else:
+                depth = DepthMap.create(
+                    raw_depth,
+                    scale=depth_scale["scale"],
+                    offset=depth_scale["offset"],
+                    in_uint16=depth_in_uint16,
+                )
 
             depth_hw = depth.depth.shape[:2]
-            if not (depth_hw[0] == camera.height.item() and depth_hw[1] == camera.width.item()):
+            if not should_interpolate and not (depth_hw[0] == camera.height.item() and depth_hw[1] == camera.width.item()):
                 camera = camera.rescale(
                     width=depth_hw[1],
                     height=depth_hw[0],
                 )
             depth.camera = camera
-
-            # depth = cls.load_depth_file(depth_file_path) * depth_scale["scale"] + depth_scale["offset"]
-            # depth = torch.tensor(depth, dtype=torch.float)
-            # depth = torch.clamp_min(depth, min=0.)
-
-            # if depth.shape != image_shape:
-            #     assert allow_depth_interpolation, "the shape '{}' of depth map '{}' and '{}' of image not match, add the '--data.parser.allow_depth_interpolation=true' if you are sure this is expected".format(depth.shape, depth_file_path, image_shape)
-            #     depth = torch.nn.functional.interpolate(
-            #         depth[None, None, ...],
-            #         image_shape,
-            #         mode="bilinear",
-            #         align_corners=True,
-            #     )[0, 0]
 
             if median_normalization:
                 depth.media_normalize()

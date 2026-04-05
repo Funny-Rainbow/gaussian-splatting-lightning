@@ -32,6 +32,7 @@ class Dataset(torch.utils.data.Dataset):
             image_device: torch.device = None,
             image_uint8: bool = False,
             allow_mask_interpolation: bool = False,
+            mask_interpolation_mode: Literal["bilinear", "nearest"] = "bilinear",
     ) -> None:
         super().__init__()
         self.image_set = image_set
@@ -45,6 +46,7 @@ class Dataset(torch.utils.data.Dataset):
         self.image_device = image_device
         self.image_uint8 = image_uint8
         self.allow_mask_interpolation = allow_mask_interpolation
+        self.mask_interpolation_mode = mask_interpolation_mode
 
         self.image_cameras: list[Camera] = [i.to_device(camera_device) for i in image_set.cameras]  # store undistorted camera
 
@@ -126,12 +128,15 @@ class Dataset(torch.utils.data.Dataset):
                 if not self.allow_mask_interpolation:
                     raise RuntimeError("The shape of mask {} doesn't match to the image {}. Add '--data.allow_mask_interpolation=true' if you are sure this is expected".format(mask.shape[:2], image.shape[:2]))
 
-                mask = (torch.nn.functional.interpolate(
-                    mask[None, None, ...].float(),
-                    image.shape[:2],
-                    mode="bilinear",
-                    align_corners=True,
-                )[0, 0] > 0.5).to(dtype=torch.uint8)
+                interpolate_kwargs = {
+                    "input": mask[None, None, ...].float(),
+                    "size": image.shape[:2],
+                    "mode": self.mask_interpolation_mode,
+                }
+                if self.mask_interpolation_mode != "nearest":
+                    interpolate_kwargs["align_corners"] = True
+
+                mask = (torch.nn.functional.interpolate(**interpolate_kwargs)[0, 0] > 0.5).to(dtype=torch.uint8)
 
             mask = (mask != 0).unsqueeze(-1).repeat(1, 1, image.shape[-1])  # False is the masked pixels
             mask = mask.permute(2, 0, 1).to(self.image_device)  # [channel, height, width]
@@ -140,11 +145,17 @@ class Dataset(torch.utils.data.Dataset):
 
         return self.image_set.image_names[index], image, mask
 
-    def get_extra_data(self, index):
-        return self.image_set.extra_data_processor(self.image_set.extra_data[index])
+    def get_extra_data(self, index, image_hw=None):
+        try:
+            return self.image_set.extra_data_processor(self.image_set.extra_data[index], image_hw)
+        except TypeError:
+            return self.image_set.extra_data_processor(self.image_set.extra_data[index])
 
     def __getitem__(self, index) -> Tuple[Camera, Tuple, Any]:
-        return self.image_cameras[index], self.get_image(index), self.get_extra_data(index)
+        image_data = self.get_image(index)
+        image = image_data[1]
+        image_hw = tuple(image.shape[-2:])
+        return self.image_cameras[index], image_data, self.get_extra_data(index, image_hw=image_hw)
 
 
 class CacheDataLoader(torch.utils.data.DataLoader):
@@ -249,6 +260,21 @@ class CacheDataLoader(torch.utils.data.DataLoader):
     def __len__(self) -> int:
         return len(self.indices)
 
+    def get_local_item(self, local_idx: int):
+        if hasattr(self, "cached"):
+            return self.cached[local_idx]
+        dataset_idx = self.indices[local_idx]
+        return self.dataset.__getitem__(dataset_idx)
+
+    def iter_local_items(self):
+        if hasattr(self, "cached"):
+            for item in self.cached:
+                yield item
+            return
+
+        for dataset_idx in self.indices:
+            yield self.dataset.__getitem__(dataset_idx)
+
     def __getitem__(self, idx):
         return self.dataset.__getitem__(idx)
 
@@ -331,6 +357,7 @@ class DataModule(LightningDataModule):
             image_uint8: bool = False,
             async_caching: bool = False,
             allow_mask_interpolation: bool = False,
+            mask_interpolation_mode: Literal["bilinear", "nearest"] = "bilinear",
             extra_points: str = None,
             max_extra_points: int = -1,
     ) -> None:
@@ -544,6 +571,7 @@ class DataModule(LightningDataModule):
                 image_device=self.image_device,
                 image_uint8=self.hparams["image_uint8"],
                 allow_mask_interpolation=self.hparams["allow_mask_interpolation"],
+                mask_interpolation_mode=self.hparams["mask_interpolation_mode"],
             ),
             max_cache_num=self.hparams["train_max_num_images_to_cache"],
             shuffle=True,
@@ -568,6 +596,7 @@ class DataModule(LightningDataModule):
                 image_device=self.image_device,
                 image_uint8=self.hparams["image_uint8"],
                 allow_mask_interpolation=self.hparams["allow_mask_interpolation"],
+                mask_interpolation_mode=self.hparams["mask_interpolation_mode"],
             ),
             max_cache_num=self.hparams["test_max_num_images_to_cache"],
             shuffle=False,
@@ -587,6 +616,7 @@ class DataModule(LightningDataModule):
                 image_device=self.image_device,
                 image_uint8=self.hparams["image_uint8"],
                 allow_mask_interpolation=self.hparams["allow_mask_interpolation"],
+                mask_interpolation_mode=self.hparams["mask_interpolation_mode"],
             ),
             max_cache_num=self.hparams["val_max_num_images_to_cache"],
             shuffle=False,

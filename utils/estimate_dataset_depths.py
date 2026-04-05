@@ -1,4 +1,5 @@
 import os
+import sys
 import argparse
 import subprocess
 
@@ -10,7 +11,7 @@ args = parser.parse_args()
 
 assert subprocess.call(
     args=[
-        "python",
+        sys.executable,
         "-u",
         os.path.join(os.path.dirname(__file__), "run_depth_anything_v2.py"),
         os.path.join(args.dataset_path, args.image_dir),
@@ -20,7 +21,7 @@ assert subprocess.call(
 
 assert subprocess.call(
     args=[
-        "python",
+        sys.executable,
         "-u",
         os.path.join(os.path.dirname(__file__), "get_depth_scales.py"),
         args.dataset_path,

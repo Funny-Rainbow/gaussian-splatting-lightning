@@ -77,11 +77,15 @@ class Taming3DGSDensityControllerFFModule(Taming3DGSDensityControllerModule):
         pl_module = self.avoid_state_dict[0]
 
         # sample cameras
-        n_cameras = len(pl_module.trainer.train_dataloader.cached)
+        train_dataloader = pl_module.trainer.train_dataloader
+        n_cameras = len(train_dataloader)
         sample_cameras = []
         sample_edge_losses = []
         for camera_idx in torch.randperm(n_cameras, dtype=torch.int)[:self.config.n_sample_cameras].tolist():
-            sample_cameras.append(pl_module.trainer.train_dataloader.cached[camera_idx])
+            if hasattr(train_dataloader, "get_local_item"):
+                sample_cameras.append(train_dataloader.get_local_item(camera_idx))
+            else:
+                sample_cameras.append(train_dataloader.cached[camera_idx])
             sample_edge_losses.append(self.all_edges[camera_idx])
 
         # calculate importance

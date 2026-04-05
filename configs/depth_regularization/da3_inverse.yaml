@@ -4,5 +4,8 @@ model:
     - rgb
 data:
   parser:
-    depth_dir: da3_inverse_depths
-    depth_scale_name: da3_inverse_depths-scales
+    class_path: internal.dataparsers.estimated_depth_colmap_dataparser.EstimatedDepthColmap
+    init_args:
+      depth_dir: da3_inverse_depths
+      depth_scale_name: da3_inverse_depths-scales
+      allow_depth_interpolation: true
