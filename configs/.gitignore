@@ -23,7 +23,10 @@
 !gsplat_v1-tile_based_culling-selective_adam.yaml
 !gsplat_v1-accel.yaml
 !gsplat_v1-accel_more.yaml
+!gsplat_v1-accel_more_SaaS.yaml
 !gsplat_v1-accel-steerable.yaml
+!gsplat_v1.yaml_SaaS.yaml
+!gsplat_v1_SaaS.yaml
 !pypreprocess_gsplat.yaml
 !swag_baseline.yaml
 !mip_splatting_gsplat_v2.yaml
@@ -96,6 +99,7 @@
 !fused_ssim.yaml
 !opacity_correction.yaml
 !normal_reg.yaml
+!sparse_adam-except_for_opacity.yaml
 !learn_exposure.yaml
 !learn_exposure-with_bias.yaml
 !learn_exposure-with_bias-shade_correction.yaml
@@ -103,8 +107,11 @@
 !bilagrid.yaml
 !bilagrid_fused.yaml
 !background_removal.yaml
+!background_removal_w_loop.yaml
+!background_removal_wo_loop.yaml
 !gns.yaml
 !depth_regularization/da3_inverse.yaml
+!depth_regularization/da3_inverse-hard_depth_background_removal.yaml
 !grad_acc.yaml
 !plugins
 !glossy.yaml

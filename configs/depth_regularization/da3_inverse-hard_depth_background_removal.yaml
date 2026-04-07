@@ -1,0 +1,16 @@
+model:
+  metric:
+    class_path: internal.metrics.background_removal_inverse_depth_metrics.BackgroundRemovalWithInverseDepthMetrics
+    init_args:
+      depth_output_key: hard_inverse_depth
+      background_removal_depth_key: hard_inverse_depth
+  renderer_output_types:
+    - rgb
+    - hard_inverse_depth
+data:
+  parser:
+    class_path: internal.dataparsers.estimated_depth_colmap_dataparser.EstimatedDepthColmap
+    init_args:
+      depth_dir: da3_inverse_depths
+      depth_scale_name: da3_inverse_depths-scales
+      allow_depth_interpolation: true

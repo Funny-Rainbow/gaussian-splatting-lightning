@@ -1,0 +1,5 @@
+model:
+  gaussian:
+    optimization:
+      optimizer: SelectiveAdam
+      opacity_optimizer: Adam
