@@ -1,7 +1,0 @@
-# ninja log v5
-0	13859	1775449733738030972	/home/ubuntu/3dgs_deps/vendor/simple-knn/build/temp.linux-x86_64-cpython-39/ext.o	539e2b66122605fc
-13877	22408	1775449742302155226	/home/ubuntu/3dgs_deps/vendor/simple-knn/build/temp.linux-x86_64-cpython-39/simple_knn.o	3217686f5776d964
-22422	55942	1775449775818641457	/home/ubuntu/3dgs_deps/vendor/simple-knn/build/temp.linux-x86_64-cpython-39/spatial.o	65bf91a616b8e986
-6	13989	1775450182668537493	/home/ubuntu/3dgs_deps/gaussian-splatting-lightning/vendor/simple-knn/build/temp.linux-x86_64-cpython-39/ext.o	50a9d266ba268e32
-13989	22676	1775450191360663337	/home/ubuntu/3dgs_deps/gaussian-splatting-lightning/vendor/simple-knn/build/temp.linux-x86_64-cpython-39/simple_knn.o	9728de26f385018c
-22676	56820	1775450225485157339	/home/ubuntu/3dgs_deps/gaussian-splatting-lightning/vendor/simple-knn/build/temp.linux-x86_64-cpython-39/spatial.o	8200fa061ddaa753
