@@ -24,6 +24,7 @@
 !gsplat_v1-accel.yaml
 !gsplat_v1-accel_more.yaml
 !gsplat_v1-accel-steerable.yaml
+!gsplat_v1-speedy.yaml
 !pypreprocess_gsplat.yaml
 !swag_baseline.yaml
 !mip_splatting_gsplat_v2.yaml
