@@ -17,6 +17,7 @@ from gsplat.cuda.isect_tiles_tile_based_culling import (
     isect_tiles_tile_based_culling,
     isect_offset_encode_tile_based_culling,
 )
+from gsplat.cuda.isect_tiles_speedy import isect_tiles_speedy
 from gsplat.v0_interfaces import rasterize_to_pixels
 
 
@@ -34,10 +35,15 @@ class GSplatV1Renderer(RendererConfig):
     tile_based_culling: bool = False
     """Tile-based culling, from StopThePop [Radl et al. 2024]"""
 
+    precise_tile_intersect: bool = False
+    """Precise Tile Intersect, from Speedy-Splat (https://speedysplat.github.io/)"""
+
     max_viewspace_grad_scale: float = 65535.
     """ 1600 is recommended """
 
     def instantiate(self, *args, **kwargs) -> "GSplatV1RendererModule":
+        assert not (self.tile_based_culling is True and self.precise_tile_intersect is True), "Tile-based Culling and Precise Tile Intersect can not be enabled at the same time"
+
         return GSplatV1RendererModule(self)
 
 
@@ -85,6 +91,8 @@ class GSplatV1RendererModule(Renderer):
         self.isect_encode = GSplatV1.isect_encode_with_unused_opacities
         if self.config.tile_based_culling:
             self.isect_encode = GSplatV1.isect_encode_tile_based_culling
+        elif self.config.precise_tile_intersect:
+            self.isect_encode = GSplatV1.isect_encode_precise
 
         self._inv_depth_alt_state = 0
         self._inv_depth_alt = [
@@ -514,6 +522,53 @@ class GSplatV1:
         isect_offsets, flatten_ids = isect_offset_encode_tile_based_culling(
             isect_ids,
             flatten_ids,
+            1,
+            tile_width,
+            tile_height,
+        )
+
+        return tiles_per_gauss, isect_ids, flatten_ids, isect_offsets
+
+    @classmethod
+    def isect_encode_precise(
+        cls,
+        preprocessed_camera: Tuple,
+        projection_results,
+        opacities: torch.Tensor,  # [1, N]
+        tile_size: int = 16,
+    ):
+        """
+        Returns:
+            A tuple:
+
+            -   **tiles_per_gauss**. [1, N]
+            -   **isect_ids**. [n_isects]
+            -   **flatten_ids**. [n_isects]
+            -   **isect_offsets**. [1, tile_height, tile_width]
+        """
+
+        img_width, img_height = preprocessed_camera[2]
+
+        radii, means2d, depths, conics, _ = projection_results
+
+        tile_width = math.ceil(img_width / float(tile_size))
+        tile_height = math.ceil(img_height / float(tile_size))
+        tiles_per_gauss, isect_ids, flatten_ids = isect_tiles_speedy(
+            means2d,
+            radii,
+            depths,
+            conics,
+            opacities.detach(),
+            tile_size,
+            tile_width,
+            tile_height,
+            packed=False,
+            n_cameras=1,
+            camera_ids=None,
+            gaussian_ids=None,
+        )
+        isect_offsets = isect_offset_encode(
+            isect_ids,
             1,
             tile_width,
             tile_height,
