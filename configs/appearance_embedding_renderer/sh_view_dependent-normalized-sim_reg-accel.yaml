@@ -12,7 +12,7 @@ model:
         normalize: true
       optimization:
         warm_up: 1000
-      tile_based_culling: true
+      precise_tile_intersect: true
   metric:
     class_path: internal.metrics.appearance_feature_similarity_regularization_metrics.VanillaMetricsWithSimilarityRegularization
     init_args:

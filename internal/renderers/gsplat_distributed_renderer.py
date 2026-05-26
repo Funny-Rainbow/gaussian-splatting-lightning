@@ -23,6 +23,8 @@ class GSplatDistributedRenderer(RendererConfig):
 
     tile_based_culling: bool = False
 
+    precise_tile_intersect: bool = False
+
     # Since the density controllers are replaceable, below parameters should be updated manually when the parameters of density controller changed
 
     redistribute_interval: int = 1000
@@ -35,6 +37,8 @@ class GSplatDistributedRenderer(RendererConfig):
     """Redistribute if min*threshold < max"""
 
     def instantiate(self, *args, **kwargs) -> Renderer:
+        assert not (self.tile_based_culling is True and self.precise_tile_intersect is True), "Tile-based Culling and Precise Tile Intersect can not be enabled at the same time"
+
         return GSplatDistributedRendererImpl(self)
 
 
@@ -53,6 +57,8 @@ class GSplatDistributedRendererImpl(Renderer):
         self.isect_encode = GSplatV1.isect_encode_with_unused_opacities
         if self.config.tile_based_culling:
             self.isect_encode = GSplatV1.isect_encode_tile_based_culling
+        elif self.config.precise_tile_intersect:
+            self.isect_encode = GSplatV1.isect_encode_precise
 
         self.world_size = 1
         self.global_rank = 0

@@ -7,7 +7,7 @@ model:
     class_path: internal.renderers.glossy_renderer.GlossyRenderer
     init_args:
       separate_sh: true
-      tile_based_culling: true
+      precise_tile_intersect: true
   density:
     opacity_reset_interval: 9999999
     cull_by_max_opacity: true

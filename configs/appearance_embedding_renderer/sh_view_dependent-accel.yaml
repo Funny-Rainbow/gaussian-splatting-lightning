@@ -12,7 +12,7 @@ model:
         normalize: false
       optimization:
         warm_up: 1000
-      tile_based_culling: true
+      precise_tile_intersect: true
   metric:
     fused_ssim: true
 data:

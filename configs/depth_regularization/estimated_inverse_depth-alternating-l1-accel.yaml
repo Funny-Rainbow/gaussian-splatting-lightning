@@ -8,7 +8,7 @@ model:
     class_path: internal.renderers.gsplat_v1_renderer.GSplatV1Renderer
     init_args:
       separate_sh: true
-      tile_based_culling: true
+      precise_tile_intersect: true
   renderer_output_types:
     - rgb
     - inv_depth_alt
