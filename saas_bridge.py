@@ -19,7 +19,7 @@ def write_json(path: Path, payload: dict) -> None:
 
 
 def _dispatch(command: str, payload: dict) -> dict:
-    from saas_api import run_keyframes, run_train, run_transform
+    from saas_api import run_keyframes, run_prune_position_sigma, run_train, run_transform
 
     if command == "keyframes":
         return run_keyframes(payload)
@@ -27,6 +27,8 @@ def _dispatch(command: str, payload: dict) -> dict:
         return run_train(payload)
     if command == "transform":
         return run_transform(payload)
+    if command == "prune-position-sigma":
+        return run_prune_position_sigma(payload)
     raise RuntimeError(f"Unsupported command: {command}")
 
 
@@ -51,7 +53,7 @@ def _error_payload(exc: Exception) -> dict:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=["keyframes", "train", "transform"])
+    parser.add_argument("command", choices=["keyframes", "train", "transform", "prune-position-sigma"])
     parser.add_argument("--request-json", required=True)
     parser.add_argument("--response-json", required=True)
     args = parser.parse_args()

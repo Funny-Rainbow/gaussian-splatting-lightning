@@ -162,3 +162,75 @@ def run_transform(payload: dict[str, Any]) -> dict[str, Any]:
         GaussianPlyUtils.load_from_model(gaussian_model).to_ply_format().save_to_ply(str(output_path))
 
     return {"ok": True, "output": str(output_path)}
+
+
+def run_prune_position_sigma(payload: dict[str, Any]) -> dict[str, Any]:
+    _ensure_import_paths()
+    import torch
+
+    from internal.utils.gaussian_model_loader import GaussianModelLoader
+    from internal.utils.gaussian_utils import GaussianPlyUtils
+
+    def _prune_gaussian(gaussian: GaussianPlyUtils, keep_mask: torch.Tensor) -> GaussianPlyUtils:
+        return GaussianPlyUtils(
+            sh_degrees=gaussian.sh_degrees,
+            xyz=gaussian.xyz[keep_mask],
+            opacities=gaussian.opacities[keep_mask],
+            features_dc=gaussian.features_dc[keep_mask],
+            features_rest=gaussian.features_rest[keep_mask],
+            scales=gaussian.scales[keep_mask],
+            rotations=gaussian.rotations[keep_mask],
+        )
+
+    with torch.no_grad():
+        input_path = Path(payload["input"]).expanduser()
+        output_path = Path(payload["output"]).expanduser()
+        sigma = float(payload.get("sigma", 3.0))
+        if sigma <= 0:
+            raise ValueError(f"sigma must be positive, got {sigma}")
+        device = torch.device(payload.get("device", "cpu"))
+
+        gaussian_model, _ = GaussianModelLoader.search_and_load(
+            str(input_path),
+            device=device,
+            eval_mode=True,
+            pre_activate=False,
+        )
+        gaussian = GaussianPlyUtils.load_from_model(gaussian_model)
+        xyz = gaussian.xyz
+        if xyz.shape[0] == 0:
+            raise RuntimeError("input Gaussian model has no points")
+
+        axis_mean = xyz.mean(dim=0)
+        axis_std = xyz.std(dim=0, unbiased=False)
+        lower = axis_mean - sigma * axis_std
+        upper = axis_mean + sigma * axis_std
+        keep_mask = torch.isfinite(xyz).all(dim=1)
+        keep_mask &= ((xyz >= lower) & (xyz <= upper)).all(dim=1)
+
+        original_count = int(xyz.shape[0])
+        kept_count = int(keep_mask.sum().item())
+        if kept_count == 0:
+            raise RuntimeError(
+                "position sigma pruning would remove all Gaussians "
+                f"(input={input_path}, sigma={sigma})"
+            )
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        _prune_gaussian(gaussian, keep_mask).to_ply_format().save_to_ply(str(output_path))
+
+    return {
+        "ok": True,
+        "input": str(input_path),
+        "output": str(output_path),
+        "sigma": sigma,
+        "original_count": original_count,
+        "kept_count": kept_count,
+        "removed_count": original_count - kept_count,
+        "thresholds": {
+            "mean": axis_mean.detach().cpu().tolist(),
+            "std": axis_std.detach().cpu().tolist(),
+            "lower": lower.detach().cpu().tolist(),
+            "upper": upper.detach().cpu().tolist(),
+        },
+    }
