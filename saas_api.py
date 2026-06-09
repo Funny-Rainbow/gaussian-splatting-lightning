@@ -171,6 +171,16 @@ def run_prune_position_sigma(payload: dict[str, Any]) -> dict[str, Any]:
     from internal.utils.gaussian_model_loader import GaussianModelLoader
     from internal.utils.gaussian_utils import GaussianPlyUtils
 
+    def _payload_bool(name: str, default: bool) -> bool:
+        value = payload.get(name, default)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return value != 0
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(value)
+
     def _prune_gaussian(gaussian: GaussianPlyUtils, keep_mask: torch.Tensor) -> GaussianPlyUtils:
         return GaussianPlyUtils(
             sh_degrees=gaussian.sh_degrees,
@@ -188,6 +198,19 @@ def run_prune_position_sigma(payload: dict[str, Any]) -> dict[str, Any]:
         sigma = float(payload.get("sigma", 3.0))
         if sigma <= 0:
             raise ValueError(f"sigma must be positive, got {sigma}")
+        auto_detect = _payload_bool("auto_detect", True)
+        auto_sigma = float(payload.get("auto_sigma", 8.0))
+        auto_max_to_p99_ratio = float(payload.get("auto_max_to_p99_ratio", 1.5))
+        auto_max_fraction = float(payload.get("auto_max_fraction", 0.02))
+        auto_min_count = int(payload.get("auto_min_count", 1))
+        if auto_sigma <= 0:
+            raise ValueError(f"auto_sigma must be positive, got {auto_sigma}")
+        if auto_max_to_p99_ratio < 1.0:
+            raise ValueError(f"auto_max_to_p99_ratio must be >= 1.0, got {auto_max_to_p99_ratio}")
+        if not 0 < auto_max_fraction <= 1:
+            raise ValueError(f"auto_max_fraction must be in (0, 1], got {auto_max_fraction}")
+        if auto_min_count < 1:
+            raise ValueError(f"auto_min_count must be >= 1, got {auto_min_count}")
         device = torch.device(payload.get("device", "cpu"))
 
         gaussian_model, _ = GaussianModelLoader.search_and_load(
@@ -201,6 +224,72 @@ def run_prune_position_sigma(payload: dict[str, Any]) -> dict[str, Any]:
         if xyz.shape[0] == 0:
             raise RuntimeError("input Gaussian model has no points")
 
+        original_count = int(xyz.shape[0])
+        auto_detection = None
+        if auto_detect:
+            finite_mask = torch.isfinite(xyz).all(dim=1)
+            finite_xyz = xyz[finite_mask]
+            finite_count = int(finite_xyz.shape[0])
+            nonfinite_count = original_count - finite_count
+            if finite_count == 0:
+                raise RuntimeError("input Gaussian model has no finite positions")
+
+            center = finite_xyz.median(dim=0).values
+            radius = torch.linalg.vector_norm(finite_xyz - center, dim=1)
+            median_radius = radius.median()
+            mad = torch.abs(radius - median_radius).median()
+            robust_sigma = 1.4826 * mad
+            p99_radius = torch.quantile(radius, 0.99) if finite_count > 1 else radius.max()
+            max_radius = radius.max()
+            far_threshold = median_radius + auto_sigma * robust_sigma
+            far_mask = radius > far_threshold
+            far_count = int(far_mask.sum().item())
+            candidate_count = far_count + nonfinite_count
+            far_fraction = far_count / finite_count
+            candidate_fraction = candidate_count / original_count
+            distance_triggered = bool(
+                max_radius.item() > far_threshold.item()
+                and max_radius.item() >= auto_max_to_p99_ratio * p99_radius.item()
+            )
+            triggered = bool(
+                candidate_count >= auto_min_count
+                and candidate_fraction <= auto_max_fraction
+                and (nonfinite_count > 0 or distance_triggered)
+            )
+            auto_detection = {
+                "enabled": True,
+                "triggered": triggered,
+                "center": center.detach().cpu().tolist(),
+                "median_radius": float(median_radius.item()),
+                "mad_radius": float(mad.item()),
+                "robust_sigma_radius": float(robust_sigma.item()),
+                "p99_radius": float(p99_radius.item()),
+                "max_radius": float(max_radius.item()),
+                "far_threshold": float(far_threshold.item()),
+                "far_count": far_count,
+                "nonfinite_count": nonfinite_count,
+                "candidate_count": candidate_count,
+                "far_fraction": far_fraction,
+                "candidate_fraction": candidate_fraction,
+                "auto_sigma": auto_sigma,
+                "auto_max_to_p99_ratio": auto_max_to_p99_ratio,
+                "auto_max_fraction": auto_max_fraction,
+                "auto_min_count": auto_min_count,
+            }
+            if not triggered:
+                return {
+                    "ok": True,
+                    "skipped": True,
+                    "reason": "auto_detection_not_triggered",
+                    "input": str(input_path),
+                    "output": str(output_path),
+                    "sigma": sigma,
+                    "original_count": original_count,
+                    "auto_detection": auto_detection,
+                }
+        else:
+            auto_detection = {"enabled": False}
+
         axis_mean = xyz.mean(dim=0)
         axis_std = xyz.std(dim=0, unbiased=False)
         lower = axis_mean - sigma * axis_std
@@ -208,7 +297,6 @@ def run_prune_position_sigma(payload: dict[str, Any]) -> dict[str, Any]:
         keep_mask = torch.isfinite(xyz).all(dim=1)
         keep_mask &= ((xyz >= lower) & (xyz <= upper)).all(dim=1)
 
-        original_count = int(xyz.shape[0])
         kept_count = int(keep_mask.sum().item())
         if kept_count == 0:
             raise RuntimeError(
@@ -227,6 +315,7 @@ def run_prune_position_sigma(payload: dict[str, Any]) -> dict[str, Any]:
         "original_count": original_count,
         "kept_count": kept_count,
         "removed_count": original_count - kept_count,
+        "auto_detection": auto_detection,
         "thresholds": {
             "mean": axis_mean.detach().cpu().tolist(),
             "std": axis_std.detach().cpu().tolist(),
