@@ -323,3 +323,352 @@ def run_prune_position_sigma(payload: dict[str, Any]) -> dict[str, Any]:
             "upper": upper.detach().cpu().tolist(),
         },
     }
+
+
+def run_render_tsdf_frames(payload: dict[str, Any]) -> dict[str, Any]:
+    _ensure_import_paths()
+    import json
+
+    import numpy as np
+    import torch
+    from PIL import Image
+
+    from internal.cameras.cameras import Cameras
+    from internal.utils.gaussian_model_loader import GaussianModelLoader
+
+    model_path = Path(payload["model_path"]).expanduser()
+    cameras_path = Path(payload["cameras_path"]).expanduser()
+    output_dir = Path(payload["output_dir"]).expanduser()
+    max_views = int(payload.get("max_views") or 0)
+    device = torch.device(payload.get("device", "cuda" if torch.cuda.is_available() else "cpu"))
+
+    cameras_data = json.loads(cameras_path.read_text(encoding="utf-8"))
+    if not isinstance(cameras_data, list) or not cameras_data:
+        raise ValueError(f"cameras.json must contain a non-empty list: {cameras_path}")
+    if max_views > 0:
+        cameras_data = cameras_data[:max_views]
+
+    rgb_dir = output_dir / "rgb"
+    depth_dir = output_dir / "depth"
+    alpha_dir = output_dir / "alpha"
+    for directory in (rgb_dir, depth_dir, alpha_dir):
+        directory.mkdir(parents=True, exist_ok=True)
+
+    gaussian_model, renderer = GaussianModelLoader.search_and_load(str(model_path), device)
+    gaussian_model.freeze()
+    gaussian_model.eval()
+    renderer.eval()
+    background = torch.zeros((3,), dtype=torch.float32, device=device)
+    available_outputs = renderer.get_available_outputs()
+    depth_type = "exp_depth" if "exp_depth" in available_outputs else "depth"
+    render_types = ["rgb", depth_type]
+    has_alpha = "alpha" in available_outputs
+    if has_alpha:
+        render_types.append("alpha")
+
+    frames = []
+    with torch.no_grad():
+        for index, camera_info in enumerate(cameras_data):
+            width = int(camera_info["width"])
+            height = int(camera_info["height"])
+            c2w = np.eye(4, dtype=np.float64)
+            c2w[:3, :3] = np.asarray(camera_info["rotation"], dtype=np.float64)
+            c2w[:3, 3] = np.asarray(camera_info["position"], dtype=np.float64)
+            w2c = np.linalg.inv(c2w)
+            camera = Cameras(
+                R=torch.tensor(w2c[:3, :3], dtype=torch.float32).unsqueeze(0),
+                T=torch.tensor(w2c[:3, 3], dtype=torch.float32).unsqueeze(0),
+                fx=torch.tensor([float(camera_info["fx"])], dtype=torch.float32),
+                fy=torch.tensor([float(camera_info["fy"])], dtype=torch.float32),
+                cx=torch.tensor([float(camera_info["cx"])], dtype=torch.float32),
+                cy=torch.tensor([float(camera_info["cy"])], dtype=torch.float32),
+                width=torch.tensor([width], dtype=torch.int16),
+                height=torch.tensor([height], dtype=torch.int16),
+                appearance_id=torch.tensor([int(camera_info.get("appearance_id") or 0)], dtype=torch.long),
+                normalized_appearance_id=torch.tensor([float(camera_info.get("normalized_appearance_id") or 0.0)], dtype=torch.float32),
+                time=torch.tensor([float(camera_info.get("time") or 0.0)], dtype=torch.float32),
+                distortion_params=None,
+                camera_type=torch.zeros((1,), dtype=torch.int8),
+            )[0].to_device(device)
+
+            outputs = renderer(
+                camera,
+                gaussian_model,
+                background,
+                scaling_modifier=1.0,
+                render_types=render_types,
+            )
+            rgb = outputs["render"].detach().clamp(0, 1).permute(1, 2, 0).cpu().numpy()
+            rgb_u8 = (rgb * 255.0).round().astype(np.uint8)
+            depth = outputs[depth_type].detach().squeeze().cpu().numpy().astype(np.float32)
+            depth[~np.isfinite(depth)] = 0.0
+            depth[depth < 0.0] = 0.0
+            if has_alpha and outputs.get("alpha") is not None:
+                alpha = outputs["alpha"].detach().squeeze().clamp(0, 1).cpu().numpy()
+            else:
+                alpha = (depth > 0.0).astype(np.float32)
+
+            stem = f"{index:05d}"
+            rgb_path = rgb_dir / f"{stem}.png"
+            depth_path = depth_dir / f"{stem}.npy"
+            alpha_path = alpha_dir / f"{stem}.png"
+            Image.fromarray(rgb_u8).save(rgb_path)
+            np.save(depth_path, depth)
+            Image.fromarray((alpha * 255.0).round().astype(np.uint8)).save(alpha_path)
+
+            frames.append(
+                {
+                    "rgb": str(rgb_path.relative_to(output_dir)),
+                    "depth": str(depth_path.relative_to(output_dir)),
+                    "alpha": str(alpha_path.relative_to(output_dir)),
+                    "intrinsics": {
+                        "width": width,
+                        "height": height,
+                        "fx": float(camera_info["fx"]),
+                        "fy": float(camera_info["fy"]),
+                        "cx": float(camera_info["cx"]),
+                        "cy": float(camera_info["cy"]),
+                    },
+                    "world_to_camera": w2c.tolist(),
+                }
+            )
+
+    manifest_path = output_dir / "manifest.json"
+    manifest = {"depth_scale": 1.0, "frames": frames}
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {
+        "ok": True,
+        "manifest": str(manifest_path),
+        "frame_count": len(frames),
+        "depth_type": depth_type,
+        "alpha": has_alpha,
+    }
+
+
+def run_extract_tsdf_mesh(payload: dict[str, Any]) -> dict[str, Any]:
+    _ensure_import_paths()
+    import json
+
+    import numpy as np
+    import open3d as o3d
+    import torch
+
+    from internal.cameras.cameras import Cameras
+    from internal.utils.gaussian_model_loader import GaussianModelLoader
+
+    model_path = Path(payload["model_path"]).expanduser()
+    cameras_path = Path(payload["cameras_path"]).expanduser()
+    output_path = Path(payload["output_path"]).expanduser()
+    output_manifest_path = Path(payload.get("output_manifest_path") or output_path.with_suffix(".json")).expanduser()
+    max_views = int(payload.get("max_views") or 0)
+    mesh_resolution = int(payload.get("mesh_resolution") or 512)
+    depth_trunc = float(payload.get("depth_trunc") or 6.0)
+    alpha_threshold = float(payload.get("alpha_threshold") or 0.5)
+    voxel_size = float(payload.get("voxel_size") or -1.0)
+    sdf_trunc = float(payload.get("sdf_trunc") or -1.0)
+    clean_mesh = bool(payload.get("clean_mesh", False))
+    min_component_triangles = max(0, int(payload.get("min_component_triangles") or 0))
+    keep_components = max(0, int(payload.get("keep_components") or 0))
+    target_triangles = max(0, int(payload.get("target_triangles") or 0))
+    decimate_enabled = bool(payload.get("decimate_enabled", False))
+    device = torch.device(payload.get("device", "cuda" if torch.cuda.is_available() else "cpu"))
+
+    if mesh_resolution <= 0:
+        raise ValueError("mesh_resolution must be positive")
+    if depth_trunc <= 0:
+        raise ValueError("depth_trunc must be positive")
+
+    def cleanup_mesh(mesh):
+        mesh.remove_duplicated_vertices()
+        mesh.remove_duplicated_triangles()
+        mesh.remove_degenerate_triangles()
+        mesh.remove_non_manifold_edges()
+        mesh.remove_unreferenced_vertices()
+        return mesh
+
+    cameras_data = json.loads(cameras_path.read_text(encoding="utf-8"))
+    if not isinstance(cameras_data, list) or not cameras_data:
+        raise ValueError(f"cameras.json must contain a non-empty list: {cameras_path}")
+    if max_views > 0:
+        cameras_data = cameras_data[:max_views]
+
+    voxel_size = voxel_size if voxel_size > 0 else depth_trunc / mesh_resolution
+    sdf_trunc = sdf_trunc if sdf_trunc > 0 else 5.0 * voxel_size
+    volume = o3d.pipelines.integration.ScalableTSDFVolume(
+        voxel_length=voxel_size,
+        sdf_trunc=sdf_trunc,
+        color_type=o3d.pipelines.integration.TSDFVolumeColorType.RGB8,
+    )
+
+    gaussian_model, renderer = GaussianModelLoader.search_and_load(str(model_path), device)
+    gaussian_model.freeze()
+    gaussian_model.eval()
+    renderer.eval()
+    background = torch.zeros((3,), dtype=torch.float32, device=device)
+    available_outputs = renderer.get_available_outputs()
+    depth_type = "exp_depth" if "exp_depth" in available_outputs else "depth"
+    render_types = ["rgb", depth_type]
+    has_alpha = "alpha" in available_outputs
+    if has_alpha:
+        render_types.append("alpha")
+
+    frame_logs = []
+    used_views = 0
+    with torch.no_grad():
+        for index, camera_info in enumerate(cameras_data):
+            width = int(camera_info["width"])
+            height = int(camera_info["height"])
+            c2w = np.eye(4, dtype=np.float64)
+            c2w[:3, :3] = np.asarray(camera_info["rotation"], dtype=np.float64)
+            c2w[:3, 3] = np.asarray(camera_info["position"], dtype=np.float64)
+            w2c = np.linalg.inv(c2w)
+            camera = Cameras(
+                R=torch.tensor(w2c[:3, :3], dtype=torch.float32).unsqueeze(0),
+                T=torch.tensor(w2c[:3, 3], dtype=torch.float32).unsqueeze(0),
+                fx=torch.tensor([float(camera_info["fx"])], dtype=torch.float32),
+                fy=torch.tensor([float(camera_info["fy"])], dtype=torch.float32),
+                cx=torch.tensor([float(camera_info["cx"])], dtype=torch.float32),
+                cy=torch.tensor([float(camera_info["cy"])], dtype=torch.float32),
+                width=torch.tensor([width], dtype=torch.int16),
+                height=torch.tensor([height], dtype=torch.int16),
+                appearance_id=torch.tensor([int(camera_info.get("appearance_id") or 0)], dtype=torch.long),
+                normalized_appearance_id=torch.tensor([float(camera_info.get("normalized_appearance_id") or 0.0)], dtype=torch.float32),
+                time=torch.tensor([float(camera_info.get("time") or 0.0)], dtype=torch.float32),
+                distortion_params=None,
+                camera_type=torch.zeros((1,), dtype=torch.int8),
+            )[0].to_device(device)
+
+            outputs = renderer(
+                camera,
+                gaussian_model,
+                background,
+                scaling_modifier=1.0,
+                render_types=render_types,
+            )
+            rgb = outputs["render"].detach().clamp(0, 1).permute(1, 2, 0).cpu().numpy()
+            rgb_u8 = np.asarray((rgb * 255.0).round(), dtype=np.uint8, order="C")
+            depth = np.asarray(outputs[depth_type].detach().squeeze().cpu().numpy(), dtype=np.float32, order="C")
+            valid = np.isfinite(depth) & (depth > 0.0) & (depth <= depth_trunc)
+            if has_alpha and outputs.get("alpha") is not None:
+                alpha = outputs["alpha"].detach().squeeze().cpu().numpy()
+                valid &= alpha >= alpha_threshold
+            if not np.any(valid):
+                frame_logs.append({"index": index, "integrated": False})
+                continue
+
+            filtered_depth = np.where(valid, depth, 0.0).astype(np.float32, copy=False)
+            rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
+                o3d.geometry.Image(rgb_u8),
+                o3d.geometry.Image(np.asarray(filtered_depth, dtype=np.float32, order="C")),
+                depth_scale=1.0,
+                depth_trunc=depth_trunc,
+                convert_rgb_to_intensity=False,
+            )
+            intrinsic = o3d.camera.PinholeCameraIntrinsic(
+                width=width,
+                height=height,
+                fx=float(camera_info["fx"]),
+                fy=float(camera_info["fy"]),
+                cx=float(camera_info["cx"]),
+                cy=float(camera_info["cy"]),
+            )
+            volume.integrate(rgbd, intrinsic, w2c)
+            used_views += 1
+            frame_logs.append({"index": index, "integrated": True})
+
+    if used_views == 0:
+        raise RuntimeError("no valid depth views were integrated")
+
+    mesh = volume.extract_triangle_mesh()
+    original_vertices = int(np.asarray(mesh.vertices).shape[0])
+    original_triangles = int(np.asarray(mesh.triangles).shape[0])
+    if clean_mesh:
+        mesh = cleanup_mesh(mesh)
+
+    component_filter = {
+        "enabled": bool(min_component_triangles > 0 or keep_components > 0),
+        "min_component_triangles": min_component_triangles,
+        "keep_components": keep_components,
+        "component_count": 0,
+        "kept_components": [],
+        "removed_triangles": 0,
+    }
+    if component_filter["enabled"] and int(np.asarray(mesh.triangles).shape[0]) > 0:
+        triangle_clusters, cluster_n_triangles, _cluster_area = mesh.cluster_connected_triangles()
+        cluster_counts = np.asarray(cluster_n_triangles, dtype=np.int64)
+        component_filter["component_count"] = int(cluster_counts.shape[0])
+        if cluster_counts.shape[0] > 0:
+            sorted_clusters = np.argsort(-cluster_counts)
+            kept_clusters = []
+            for cluster_id in sorted_clusters:
+                cluster_id = int(cluster_id)
+                if min_component_triangles > 0 and int(cluster_counts[cluster_id]) < min_component_triangles:
+                    continue
+                kept_clusters.append(cluster_id)
+                if keep_components > 0 and len(kept_clusters) >= keep_components:
+                    break
+            if not kept_clusters:
+                kept_clusters = [int(sorted_clusters[0])]
+
+            triangle_cluster_ids = np.asarray(triangle_clusters, dtype=np.int64)
+            remove_mask = ~np.isin(triangle_cluster_ids, np.asarray(kept_clusters, dtype=np.int64))
+            removed_triangles = int(remove_mask.sum())
+            if removed_triangles > 0:
+                mesh.remove_triangles_by_mask(remove_mask.tolist())
+                mesh.remove_unreferenced_vertices()
+            component_filter["kept_components"] = [
+                {"id": int(cluster_id), "triangles": int(cluster_counts[cluster_id])}
+                for cluster_id in kept_clusters
+            ]
+            component_filter["removed_triangles"] = removed_triangles
+
+    triangles_after_component_filter = int(np.asarray(mesh.triangles).shape[0])
+    decimation = {
+        "enabled": decimate_enabled,
+        "target_triangles": target_triangles,
+        "applied": False,
+        "input_triangles": triangles_after_component_filter,
+        "output_triangles": triangles_after_component_filter,
+    }
+    if decimate_enabled and target_triangles > 0 and triangles_after_component_filter > target_triangles:
+        mesh = mesh.simplify_quadric_decimation(target_number_of_triangles=target_triangles)
+        decimation["applied"] = True
+        decimation["output_triangles"] = int(np.asarray(mesh.triangles).shape[0])
+
+    if clean_mesh:
+        mesh = cleanup_mesh(mesh)
+    mesh.compute_vertex_normals()
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if not o3d.io.write_triangle_mesh(str(output_path), mesh):
+        raise RuntimeError(f"failed to write mesh: {output_path}")
+
+    vertices = int(np.asarray(mesh.vertices).shape[0])
+    triangles = int(np.asarray(mesh.triangles).shape[0])
+    if decimation["applied"]:
+        decimation["output_triangles"] = triangles
+    manifest = {
+        "mesh_path": str(output_path),
+        "vertices": vertices,
+        "triangles": triangles,
+        "used_views": used_views,
+        "skipped_views": len(cameras_data) - used_views,
+        "voxel_size": voxel_size,
+        "sdf_trunc": sdf_trunc,
+        "depth_trunc": depth_trunc,
+        "alpha_threshold": alpha_threshold,
+        "mesh_resolution": mesh_resolution,
+        "max_views": max_views,
+        "frame_count": len(cameras_data),
+        "depth_type": depth_type,
+        "alpha": has_alpha,
+        "clean_mesh": clean_mesh,
+        "original_vertices": original_vertices,
+        "original_triangles": original_triangles,
+        "component_filter": component_filter,
+        "decimation": decimation,
+        "frames": frame_logs,
+    }
+    output_manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    output_manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {"ok": True, **manifest, "manifest": str(output_manifest_path)}

@@ -19,7 +19,14 @@ def write_json(path: Path, payload: dict) -> None:
 
 
 def _dispatch(command: str, payload: dict) -> dict:
-    from saas_api import run_keyframes, run_prune_position_sigma, run_train, run_transform
+    from saas_api import (
+        run_extract_tsdf_mesh,
+        run_keyframes,
+        run_prune_position_sigma,
+        run_render_tsdf_frames,
+        run_train,
+        run_transform,
+    )
 
     if command == "keyframes":
         return run_keyframes(payload)
@@ -29,6 +36,10 @@ def _dispatch(command: str, payload: dict) -> dict:
         return run_transform(payload)
     if command == "prune-position-sigma":
         return run_prune_position_sigma(payload)
+    if command == "render-tsdf-frames":
+        return run_render_tsdf_frames(payload)
+    if command == "extract-tsdf-mesh":
+        return run_extract_tsdf_mesh(payload)
     raise RuntimeError(f"Unsupported command: {command}")
 
 
@@ -53,7 +64,17 @@ def _error_payload(exc: Exception) -> dict:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=["keyframes", "train", "transform", "prune-position-sigma"])
+    parser.add_argument(
+        "command",
+        choices=[
+            "keyframes",
+            "train",
+            "transform",
+            "prune-position-sigma",
+            "render-tsdf-frames",
+            "extract-tsdf-mesh",
+        ],
+    )
     parser.add_argument("--request-json", required=True)
     parser.add_argument("--response-json", required=True)
     args = parser.parse_args()
