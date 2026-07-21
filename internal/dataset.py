@@ -154,7 +154,7 @@ class Dataset(torch.utils.data.Dataset):
     def __getitem__(self, index) -> Tuple[Camera, Tuple, Any]:
         image_data = self.get_image(index)
         image = image_data[1]
-        image_hw = tuple(image.shape[-2:])
+        image_hw = tuple(image.shape[-2:]) if image is not None else None
         return self.image_cameras[index], image_data, self.get_extra_data(index, image_hw=image_hw)
 
 

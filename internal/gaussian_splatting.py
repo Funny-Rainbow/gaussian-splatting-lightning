@@ -353,6 +353,8 @@ class GaussianSplatting(LightningModule):
         # log learning rate and gaussian count every 100 iterations (without plus one step)
         if self.trainer.global_step % 100 == 0:
             optimizers = self.optimizers(use_pl_optimizer=False)
+            if isinstance(optimizers, list) is False:
+                optimizers = [optimizers]
             metrics_to_log = {
                 "train/gaussians_count": self.gaussian_model.get_xyz.shape[0],
             }
@@ -643,10 +645,16 @@ class GaussianSplatting(LightningModule):
                     schedulers.append(new_schedulers)
 
         # gaussian model optimizer and scheduler setup
-        gaussian_optimizers, gaussian_schedulers = self.gaussian_model.training_setup(self)
-        self.gaussian_optimizers = gaussian_optimizers
-        if isinstance(self.gaussian_optimizers, list) is False:
-            self.gaussian_optimizers = [self.gaussian_optimizers]
+        if getattr(self.renderer, "freeze_gaussian_model", False) is True:
+            self.gaussian_model.freeze()
+            gaussian_optimizers, gaussian_schedulers = [], []
+            self.gaussian_optimizers = []
+            self.print("Gaussian model parameters are frozen by renderer.freeze_gaussian_model=True")
+        else:
+            gaussian_optimizers, gaussian_schedulers = self.gaussian_model.training_setup(self)
+            self.gaussian_optimizers = gaussian_optimizers
+            if isinstance(self.gaussian_optimizers, list) is False:
+                self.gaussian_optimizers = [self.gaussian_optimizers]
         add_optimizers_and_schedulers(gaussian_optimizers, gaussian_schedulers)
         # add frozen Gaussians
         if self.frozen_gaussians is not None:

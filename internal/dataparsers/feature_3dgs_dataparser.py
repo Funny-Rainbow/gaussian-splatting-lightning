@@ -1,4 +1,5 @@
 import os
+import numpy as np
 import torch
 
 from dataclasses import dataclass
@@ -43,4 +44,17 @@ class Feature3DGSColmapDataParser(ColmapDataParser):
 
     @staticmethod
     def read_semantic_data(path):
-        return torch.load(path, map_location="cpu")
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"Feature3DGS feature file not found: {path}")
+        if path.endswith(".npy"):
+            feature = np.load(path)
+            if feature.ndim != 3:
+                raise RuntimeError(f"Expected HxWxC .npy feature grid, got {feature.shape}: {path}")
+            return torch.from_numpy(feature).permute(2, 0, 1).float()
+        try:
+            feature = torch.load(path, map_location="cpu", weights_only=True)
+        except TypeError:
+            feature = torch.load(path, map_location="cpu")
+        if feature.ndim == 3 and feature.shape[-1] > feature.shape[0] and feature.shape[-1] > feature.shape[1]:
+            feature = feature.permute(2, 0, 1)
+        return feature.float()

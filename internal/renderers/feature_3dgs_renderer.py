@@ -36,6 +36,14 @@ class Feature3DGSRenderer(Renderer):
             feature_lr: float = 0.001,
             feature_decoder_lr: float = 0.0001,
             rasterize_batch: int = 32,
+            freeze_gaussian_model: bool = False,
+            feature_init: Literal["zeros", "normal", "uniform", "normal_unit"] = "zeros",
+            feature_init_std: float = 0.01,
+            feature_init_norm: float = 1.0,
+            feature_init_seed: int = 0,
+            feature_init_path: str = "",
+            feature_init_noise_std: float = 0.0,
+            feature_init_normalize: bool = False,
     ):
         super().__init__()
         self.speedup = speedup
@@ -43,6 +51,14 @@ class Feature3DGSRenderer(Renderer):
         self.feature_lr = feature_lr
         self.feature_decoder_lr = feature_decoder_lr
         self.rasterize_batch = rasterize_batch
+        self.freeze_gaussian_model = freeze_gaussian_model
+        self.feature_init = feature_init
+        self.feature_init_std = feature_init_std
+        self.feature_init_norm = feature_init_norm
+        self.feature_init_seed = feature_init_seed
+        self.feature_init_path = feature_init_path
+        self.feature_init_noise_std = feature_init_noise_std
+        self.feature_init_normalize = feature_init_normalize
 
         # update this when feature updated
         self.pca_projected_color = None
@@ -62,12 +78,46 @@ class Feature3DGSRenderer(Renderer):
         self.n_actual_feature_dims = n_actual_feature_dims
 
         # initialize features
-        feature_tensor = torch.zeros(
-            (kwargs["lightning_module"].gaussian_model.n_gaussians, n_actual_feature_dims),
-            dtype=torch.float,
-            device=kwargs["lightning_module"].device,
-            requires_grad=True,
-        )
+        feature_shape = (kwargs["lightning_module"].gaussian_model.n_gaussians, n_actual_feature_dims)
+        feature_tensor = torch.zeros(feature_shape, dtype=torch.float, device=kwargs["lightning_module"].device)
+        if self.feature_init != "zeros":
+            generator = torch.Generator(device=feature_tensor.device)
+            generator.manual_seed(int(self.feature_init_seed))
+            if self.feature_init == "normal":
+                feature_tensor.normal_(mean=0.0, std=float(self.feature_init_std), generator=generator)
+            elif self.feature_init == "uniform":
+                bound = float(self.feature_init_std)
+                feature_tensor.uniform_(-bound, bound, generator=generator)
+            elif self.feature_init == "normal_unit":
+                feature_tensor.normal_(mean=0.0, std=1.0, generator=generator)
+                feature_tensor = torch.nn.functional.normalize(feature_tensor, dim=-1) * float(self.feature_init_norm)
+            else:
+                raise ValueError(f"Unsupported feature_init={self.feature_init}")
+        if self.feature_init_path:
+            loaded_features = torch.load(self.feature_init_path, map_location=feature_tensor.device)
+            if isinstance(loaded_features, dict):
+                loaded_features = loaded_features.get("features", loaded_features.get("renderer.features"))
+            if loaded_features is None:
+                raise ValueError(f"No feature tensor found in feature_init_path={self.feature_init_path}")
+            loaded_features = loaded_features.to(device=feature_tensor.device, dtype=feature_tensor.dtype)
+            if tuple(loaded_features.shape) != tuple(feature_shape):
+                raise ValueError(
+                    f"feature_init_path shape mismatch: got {tuple(loaded_features.shape)}, expected {tuple(feature_shape)}"
+                )
+            feature_tensor = loaded_features
+            if self.feature_init_noise_std > 0:
+                generator = torch.Generator(device=feature_tensor.device)
+                generator.manual_seed(int(self.feature_init_seed))
+                feature_tensor = feature_tensor + torch.randn(
+                    feature_tensor.shape,
+                    dtype=feature_tensor.dtype,
+                    device=feature_tensor.device,
+                    generator=generator,
+                ) * float(self.feature_init_noise_std)
+            if self.feature_init_normalize:
+                feature_tensor = torch.nn.functional.normalize(feature_tensor, dim=-1) * float(self.feature_init_norm)
+                feature_tensor = torch.nan_to_num(feature_tensor, nan=0.0, posinf=0.0, neginf=0.0)
+        feature_tensor.requires_grad_(True)
         self.features = torch.nn.Parameter(feature_tensor)
 
     def training_setup(self, module: lightning.LightningModule) -> Tuple[
@@ -138,9 +188,9 @@ class Feature3DGSRenderer(Renderer):
                     outputs["render"] = outputs["render"] * (interpolated_mask > 0.5)
         if "features" in render_types or "features_vanilla_pca_2d" in render_types:
             rendered_features_list = []
-            feature_bg_color = torch.zeros((self.rasterize_batch,), dtype=torch.float, device=self.features.device)
-            for i in range(self.n_actual_feature_dims // self.rasterize_batch):
-                start = i * self.rasterize_batch
+            for start in range(0, self.n_actual_feature_dims, self.rasterize_batch):
+                chunk_dims = min(self.rasterize_batch, self.n_actual_feature_dims - start)
+                feature_bg_color = torch.zeros((chunk_dims,), dtype=torch.float, device=self.features.device)
                 rendered_features_list.append(GSPlatRenderer.rasterize_simplified(
                     project_results,
                     viewpoint_camera=viewpoint_camera,
